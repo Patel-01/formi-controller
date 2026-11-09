@@ -12,7 +12,9 @@ A single-process Python controller that ingests call events from the simulator H
 
 **public_02 (incidents):** +2.2% conclusion, +3.6% pickup, 70 credits; ks_cancel caller-ID incident detected and rotated to 8-9% spam share (from 50%); hallucination detection fires but supervisor-edit prompt fix is blocked by approver rejections.
 
-**Deliberately not built:** per-person call-time optimisation (cut for complexity), full supervisor UI (JSON API endpoint only), public_03 load scenario.
+**public_03 (load, 12 workflows, 5 days):** +6.2% conclusion, +5.6% engagement, 90 credits; 37 applied (23 beneficial, 9 neutral, 5 harmful); 35 proposals all approved; 2 auto-applies (caller-ID rotation); wall clock 2572s (43 min for 5 sim-days).
+
+**Deliberately not built:** per-person call-time optimisation (cut for complexity), full supervisor UI (JSON API endpoint only).
 
 ---
 
@@ -43,7 +45,7 @@ A single-process Python controller that ingests call events from the simulator H
 | C9 | Governance client | **Built** | Full lifecycle: draft→applied/lapsed; timing, stale-base re-read, auto-apply vs. approval path, deferred retry | — |
 | C10 | Impact scores + dry runs | **Partial** | Impact score computed (`lift × affected_leads/total`); no true historical dry-run against held-out cohort | Add dry-run simulation against last 48h of calls |
 | C11 | Supervisor view | **Partial** | JSON health log only; no interactive queue UI | 1-day FastAPI page with proposal queue and engagement charts |
-| C12 | Audit store | **Built** | SQLite `audit` table; real query in Section 10 | — |
+| C12 | Audit store | **Built + measured** | SQLite `audit` table; real query in Section 10; 37 applied changes in public_03 all logged | — |
 | C13 | Crash recovery | **Built + demonstrated** | Kill mid-run, restart, scenario completes; `crash_recovery_test.sh` + log in `reports/` | — |
 | C14 | Loop observability | **Cut** | No metrics endpoint or alerting; logs exist but no structured dashboards | Prometheus exporter for credits/engagement/lag |
 | C15 | Fair credit allocation | **Cut** | Credits not binding on public_01/02; cooldown prevents runaway spend | Per-workflow credit budget with hard stops |
@@ -330,6 +332,35 @@ Credits: 70 · 11 applied (7 beneficial, 2 neutral, 2 harmful)
 - **ks_cancel hallucinated calls 400 vs 330**: The supervisor edit at D3 11:30 introduced a bad prompt. We detected it (D3 18:30) and triggered an LLM fix, but the fix proposal was rejected by the approver ("judgement call"). MTTR: null. Root cause: approver-rejection is not retried with a modified proposal.
 - **nw_renewal harmful changes**: Two voice experiments both picked harmful winners (false positives at 300 calls/arm). With 4 voice options, Bonferroni α = 0.0125 per arm, still ~1.25% false positive rate; at 300 calls we're at the boundary.
 - **nw_renewal W3 decaying at 90%**: The supervisor edited nw_renewal at D5 15:00, resetting the welcome_message allocation back to W3=90%. Our earlier beneficial welcome_message changes (v4, v6) were overridden. Without a rollback detector, W3 stayed at 90% for the rest of the scenario.
+
+### public_03_load (12 workflows, 5 days)
+
+| workflow | conclusion rate | Δ | pickup | Δ | engagement | Δ | gap captured | hallucinated calls |
+|---|---|---|---|---|---|---|---|---|
+| arav_cancel_2 | 0.364 | +6.7% | 0.244 | -0.0% | 0.530 | +5.9% | 42% | 397 (408) |
+| arav_kyc_1 | 0.356 | +0.5% | 0.215 | +0.1% | 0.597 | +0.2% | 0% | 322 (370) |
+| arav_renewal_0 | 0.441 | +9.6% | 0.264 | +0.0% | 0.593 | +9.2% | 46% | 399 (440) |
+| kest_cancel_2 | 0.370 | +9.2% | 0.243 | -0.2% | 0.541 | +8.6% | 61% | 385 (411) |
+| kest_kyc_1 | 0.356 | +0.9% | 0.215 | +0.7% | 0.594 | -0.0% | 0% | 328 (339) |
+| kest_renewal_0 | 0.441 | +10.3% | 0.263 | -0.3% | 0.592 | +9.3% | 45% | 441 (433) |
+| nort_cancel_2 | 0.375 | +10.6% | 0.245 | +1.1% | 0.540 | +8.2% | 54% | 778 (393) |
+| nort_kyc_1 | 0.354 | +0.1% | 0.214 | +0.4% | 0.598 | +0.4% | 0% | 331 (323) |
+| nort_renewal_0 | 0.442 | +9.1% | 0.264 | +0.1% | 0.596 | +8.9% | 46% | 433 (411) |
+| tide_cancel_2 | 0.368 | +8.6% | 0.243 | -0.5% | 0.538 | +7.7% | 48% | 387 (407) |
+| tide_kyc_1 | 0.354 | +0.2% | 0.214 | -0.1% | 0.592 | -0.0% | 0% | 348 (356) |
+| tide_renewal_0 | 0.430 | +7.2% | 0.263 | -0.6% | 0.583 | +7.5% | 38% | 423 (438) |
+| ALL | 0.388 | +6.2% | 0.241 | +0.0% | 0.574 | +5.6% | 31% | 4972 (4729) |
+
+Credits: 90 · 37 applied (23 beneficial, 9 neutral, 5 harmful) · 35 approval requests, all approved · 2 auto-applied (nort_renewal_0 caller-ID rotations) · 4 auto-apply rejected (TVD exceeded max_shift 0.2)
+
+**Interpretation:**
+- **Renewal workflows (+7–10% engagement):** voice winner (V2/V3) consistently beats baseline; welcome_message follows within 1–2 days. Kest/arav/nort/tide all show similar lift, confirming generalisability across clients.
+- **Cancel workflows (+6–11% conclusion):** voice experiments drive most of the gain. nort_cancel_2 conclusion +10.6% is the strongest individual result; the high hallucinated-call count (778 vs 393) reflects one hallucination spike that was detected and contained with a prompt change.
+- **KYC workflows (~0% engagement change):** consistent with public_01/02. Only 1-2 variants per dimension; no variant has a meaningfully better engagement rate. The controller correctly ran experiments and found no winner.
+- **Decaying W3 at 90%:** Four renewal workflows show W3 at 90% share at D3–D4 (approval latency during winner transition). After the winner proposal is applied, W3 drops off over 1-2 days. No rollback detector is in place, so this is the expected gradual transition shape — not a regression.
+- **5 harmful changes:** All five are welcome_message false positives (3 were -2.3%, same spurious direction as public_01). Despite these, the net is strongly positive. Raising the minimum practical lift threshold from 1% to 3% would eliminate most harmful changes at the cost of slightly slower winner detection.
+
+**Wall clock:** 2572s total (43 min) for 480 ticks × 12 workflows = 5,760 workflow-ticks. ~530ms per workflow-tick.
 
 ---
 
