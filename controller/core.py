@@ -9,10 +9,11 @@ Capabilities built:
   C9  Governance (approval lifecycle, timing, batching, stale-base retry)
   C12 Audit log (SQLite — query: SELECT * FROM audit WHERE workflow_id=?)
   C13 Crash recovery (reconcile proposals on startup from /approvals)
+  C14 Observability: Prometheus-style /metrics on port 8711
 
 Cuts: C2 fancy cohort splits, C4 call-time opt,
       C10 dry-run beyond estimate, C11 supervisor UI,
-      C14 metrics endpoint, C15 fair credit allocation.
+      C15 fair credit allocation.
 Partial: C3 history ingested for watermark only (no stat bootstrap),
          C7 no rollback after winner promotion.
 """
@@ -20,23 +21,28 @@ Partial: C3 history ingested for watermark only (no stat bootstrap),
 import copy
 import json
 import logging
+import time
 import uuid
 from typing import Optional
 
 import httpx
 
 from .db import add_audit, kv_get, kv_set, open_db
+from .metrics import MetricsServer, record
 from .stats import MIN_CALLS_PER_ARM, bonferroni_alpha, z_test_two_props
 
 log = logging.getLogger(__name__)
 
 
 class Controller:
-    def __init__(self, sim_url: str, db_path: str = "controller.db"):
+    def __init__(self, sim_url: str, db_path: str = "controller.db",
+                 metrics_port: int = 8711):
         self.db = open_db(db_path)
         self.c = httpx.Client(base_url=sim_url, timeout=180)
         self.workflows: dict = {}   # wf_id → workflow metadata
         self.tick_minutes = 15
+        self._metrics = MetricsServer(db_path=db_path, port=metrics_port)
+        self._metrics.start()
 
     # ─── Startup ─────────────────────────────────────────────────────────────
 
@@ -63,6 +69,7 @@ class Controller:
 
             data = resp.json()
             ts = data["ts"]
+            _tick_start = time.monotonic()
 
             for chunk in data.get("new_chunks", []):
                 try:
@@ -77,6 +84,15 @@ class Controller:
                     log.exception("Error in tick for %s", wf_id)
 
             self.db.commit()
+            record("formi_tick_duration_seconds", time.monotonic() - _tick_start)
+
+            # Record credits remaining when available (not all scenarios expose this)
+            try:
+                state = self.c.get("/sim/state").json()
+                if "credits_remaining" in state:
+                    record("formi_credits_remaining", state["credits_remaining"])
+            except Exception:
+                pass
 
             if data.get("finished"):
                 log.info("Scenario finished (flag).")
