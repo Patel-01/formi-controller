@@ -207,6 +207,7 @@ class Controller:
         self._check_caller_ids(wf_id, ts)
         self._check_hallucination(wf_id, ts)
         self._advance_experiments(wf_id, ts)
+        self._optimise_call_times(wf_id, ts)     # C4: adjust hour_weights from observed pickup
 
     # ─── Governance ──────────────────────────────────────────────────────────
 
@@ -925,6 +926,81 @@ class Controller:
                 kv_set(self.db, f"pending_cid:{wf_id}", None)
         else:
             kv_set(self.db, f"pending_cid:{wf_id}", None)
+
+    # ─── Call-time optimisation (C4) ─────────────────────────────────────────
+
+    def _optimise_call_times(self, wf_id: str, ts: str):
+        """Mine pickup-rate by hour-of-day and propose schedule.hour_weights updates (C4).
+
+        Runs once per 24 sim-hours per workflow. Needs ≥500 connected calls to avoid noise.
+        Only proposes if the new weights differ materially (≥5pp on the best hour).
+        """
+        last = kv_get(self.db, f"calltime_last:{wf_id}") or ""
+        if last and ts < _add_hours(last, 24):
+            return
+
+        rows = self.db.execute("""
+            SELECT CAST(substr(ts, 12, 2) AS INT) AS hour,
+                   COUNT(*) AS dials,
+                   SUM(connected) AS connected
+            FROM calls
+            WHERE workflow_id=?
+            GROUP BY hour
+        """, (wf_id,)).fetchall()
+
+        if not rows:
+            return
+
+        total_connected = sum(r["connected"] or 0 for r in rows)
+        if total_connected < 500:
+            return
+
+        # Pickup rate per hour; fill missing hours with the overall mean
+        overall_rate = sum(r["connected"] or 0 for r in rows) / max(
+            sum(r["dials"] for r in rows), 1
+        )
+        hour_rate = {r["hour"]: (r["connected"] or 0) / max(r["dials"], 1) for r in rows}
+        # 24-hour vector — smooth with a mild prior (blend 80/20 with global mean)
+        vec = {h: 0.8 * hour_rate.get(h, overall_rate) + 0.2 * overall_rate
+               for h in range(24)}
+
+        # Normalise to weights that sum to 1
+        total = sum(vec.values()) or 1
+        new_weights = {str(h): round(vec[h] / total, 4) for h in range(24)}
+
+        # Compare against current weights; skip if essentially unchanged
+        cur = self._get_config(wf_id)
+        if cur is not None:
+            cur_weights = cur["config"].get("schedule", {}).get("hour_weights", {})
+            best_new = max(new_weights.values())
+            best_cur = max(cur_weights.values()) if cur_weights else 0
+            if abs(best_new - best_cur) < 0.05:
+                kv_set(self.db, f"calltime_last:{wf_id}", ts)
+                return
+
+            new_cfg = copy.deepcopy(cur["config"])
+            new_cfg.setdefault("schedule", {})["hour_weights"] = new_weights
+
+            best_hour = max(range(24), key=lambda h: vec[h])
+            worst_hour = min(range(24), key=lambda h: vec[h])
+            summary = f"Update schedule.hour_weights: peak hour {best_hour:02d}:00 ({vec[best_hour]:.1%} pickup)"
+            rationale = (
+                f"Analysed {total_connected} connected calls by hour-of-day. "
+                f"Best hour: {best_hour:02d}:00 ({hour_rate.get(best_hour, 0):.1%} pickup). "
+                f"Worst hour: {worst_hour:02d}:00 ({hour_rate.get(worst_hour, 0):.1%} pickup). "
+                f"hour_weights updated proportionally; auto-apply safe (schedule dimension)."
+            )
+
+            wf = self.workflows.get(wf_id, {})
+            aa = wf.get("governance", {}).get("auto_apply", {})
+            can_auto = aa.get("enabled") and "schedule" in aa.get("allowed_dims", [])
+            applied = False
+            if can_auto:
+                applied = self._auto_apply(wf_id, ts, new_cfg, rationale)
+            if not applied and self._can_submit(wf_id, ts):
+                self._submit_proposal(wf_id, ts, new_cfg, summary, rationale)
+
+        kv_set(self.db, f"calltime_last:{wf_id}", ts)
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
 
