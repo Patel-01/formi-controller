@@ -207,6 +207,7 @@ class Controller:
         self._check_caller_ids(wf_id, ts)
         self._check_hallucination(wf_id, ts)
         self._advance_experiments(wf_id, ts)
+        self._check_decay(wf_id, ts)             # C7: detect winner degradation post-promotion
 
     # ─── Governance ──────────────────────────────────────────────────────────
 
@@ -812,7 +813,8 @@ class Controller:
                 best_v, best_lift, best_p = v, lift, p
 
         if best_v:
-            self._conclude_experiment(exp_id, wf_id, dim, best_v, best_lift, best_p, ts)
+            self._conclude_experiment(exp_id, wf_id, dim, best_v, best_lift, best_p, ts,
+                                      ctrl_rate=ctrl_rate)
         else:
             # No winner yet — log current state periodically
             ts_hour = ts[11:13]
@@ -821,7 +823,8 @@ class Controller:
                          wf_id, dim, exp_id[:8])
 
     def _conclude_experiment(self, exp_id: str, wf_id: str, dim: str,
-                              winner: str, lift: float, p_val: float, ts: str):
+                              winner: str, lift: float, p_val: float, ts: str,
+                              ctrl_rate: float = 0.0):
         self.db.execute(
             "UPDATE experiments SET status='done', concluded_ts=?, winner=? WHERE exp_id=?",
             (ts, winner, exp_id)
@@ -831,6 +834,16 @@ class Controller:
                    "lift": round(lift, 4), "p_value": round(p_val, 6)})
         log.info("[%s] Winner for %s: %s (+%.1f%%, p=%.4f)",
                  wf_id, dim, winner, lift * 100, p_val)
+
+        # Arm decay monitor: check if the winner degrades post-promotion (C7)
+        kv_set(self.db, f"decay_monitor:{wf_id}:{dim}", {
+            "winner": winner,
+            "ctrl_rate": ctrl_rate,
+            "observed_lift": lift,
+            "promoted_ts": ts,
+            "min_check_ts": _add_hours(ts, 24),
+            "rollback_tried": False,
+        })
 
         cur = self._get_config(wf_id)
         if cur is None:
@@ -925,6 +938,89 @@ class Controller:
                 kv_set(self.db, f"pending_cid:{wf_id}", None)
         else:
             kv_set(self.db, f"pending_cid:{wf_id}", None)
+
+    # ─── Decay detection (C7) ────────────────────────────────────────────────
+
+    def _check_decay(self, wf_id: str, ts: str):
+        """Post-promotion lift monitor. If a winner's rolling rate drops below
+        50% of its observed lift, submit a rollback proposal (C7)."""
+        wf = self.workflows.get(wf_id, {})
+        primary_kpi = wf.get("objective", {}).get("primary", "engagement_rate")
+        for dim in ["voice", "welcome_message"]:
+            mon = kv_get(self.db, f"decay_monitor:{wf_id}:{dim}")
+            if not mon or mon.get("rollback_tried"):
+                continue
+            if ts < mon["min_check_ts"]:
+                continue
+
+            winner = mon["winner"]
+            since = _add_hours(ts, -24)
+
+            if primary_kpi == "engagement_rate":
+                row = self.db.execute(
+                    f"SELECT SUM(connected) AS n, SUM(engaged) AS s FROM calls "
+                    f"WHERE workflow_id=? AND {dim}=? AND ts>=? AND connected=1",
+                    (wf_id, winner, since),
+                ).fetchone()
+                n, s = (row["n"] or 0), (row["s"] or 0)
+                current_rate = s / n if n else 0.0
+            else:
+                row = self.db.execute(
+                    f"SELECT COUNT(*) AS n, SUM(connected) AS s FROM calls "
+                    f"WHERE workflow_id=? AND {dim}=? AND ts>=?",
+                    (wf_id, winner, since),
+                ).fetchone()
+                n, s = (row["n"] or 0), (row["s"] or 0)
+                current_rate = s / n if n else 0.0
+
+            if n < 150:  # need enough post-promotion calls to judge
+                continue
+
+            ctrl_rate = mon["ctrl_rate"]
+            original_lift = mon["observed_lift"]
+            current_lift = current_rate - ctrl_rate
+
+            # Decay: current lift < 50% of what we saw at winner conclusion
+            if current_lift < 0.5 * original_lift:
+                log.warning(
+                    "[%s] Decay detected on %s/%s: lift %.1f%% → %.1f%% (threshold %.1f%%)",
+                    wf_id, dim, winner,
+                    original_lift * 100, current_lift * 100, 0.5 * original_lift * 100,
+                )
+                add_audit(self.db, ts, wf_id, "decay_detected", {
+                    "dim": dim, "winner": winner,
+                    "original_lift": round(original_lift, 4),
+                    "current_lift": round(current_lift, 4),
+                })
+                self._propose_rollback(wf_id, dim, winner, ts, ctrl_rate, current_lift, original_lift)
+                kv_set(self.db, f"decay_monitor:{wf_id}:{dim}", {**mon, "rollback_tried": True})
+
+    def _propose_rollback(self, wf_id: str, dim: str, winner: str, ts: str,
+                          ctrl_rate: float, current_lift: float, original_lift: float):
+        """Submit a proposal that resets the dimension to even distribution (C7 rollback)."""
+        cur = self._get_config(wf_id)
+        if cur is None:
+            return
+        wf = self.workflows.get(wf_id, {})
+        all_v = wf.get("options", {}).get(dim, [])
+        if not all_v:
+            return
+        new_cfg = copy.deepcopy(cur["config"])
+        # Even split across all variants — restart exploration
+        even = {v: 1.0 / len(all_v) for v in all_v}
+        for cohort in new_cfg.get("allocations", {}):
+            new_cfg["allocations"][cohort][dim] = even
+        summary = f"Rollback {dim}: reset to even split after {winner} degraded"
+        rationale = (
+            f"Winner {winner} showed +{original_lift:.1%} at promotion but only "
+            f"+{current_lift:.1%} in the past 24h (< 50% of observed lift). "
+            f"Reverting to even exploration to find a stable variant."
+        )
+        if self._can_submit(wf_id, ts):
+            self._submit_proposal(wf_id, ts, new_cfg, summary, rationale)
+        else:
+            kv_set(self.db, f"pending_rollback:{wf_id}:{dim}",
+                   {"summary": summary, "rationale": rationale, "cfg": new_cfg})
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
 
