@@ -10,9 +10,11 @@ Capabilities built:
   C12 Audit log (SQLite — query: SELECT * FROM audit WHERE workflow_id=?)
   C13 Crash recovery (reconcile proposals on startup from /approvals)
 
-Cuts: C2 fancy cohort splits, C3 history bootstrap, C4 call-time opt,
-      C7 decay/rollback, C10 dry-run beyond estimate, C11 supervisor UI,
+Cuts: C2 fancy cohort splits, C4 call-time opt,
+      C10 dry-run beyond estimate, C11 supervisor UI,
       C14 metrics endpoint, C15 fair credit allocation.
+Partial: C3 history ingested for watermark only (no stat bootstrap),
+         C7 no rollback after winner promotion.
 """
 
 import copy

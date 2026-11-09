@@ -32,18 +32,21 @@ A single-process Python controller that ingests call events from the simulator H
 
 | # | Capability | Built / Partial / Cut | Why | What it would take to finish |
 |---|---|---|---|---|
-| C1 | Event ingestion | **Built** | Mandatory; crash-safe with chunk watermark | — |
-| C2 | History bootstrap | **Built** | Needed for DID health (live-call watermark keeps history out of detection) | — |
-| C3 | Per-person call-time | **Cut** | Small expected lift vs. large complexity | 2-day sprint: lead metadata table, hour bucket stats, per-person best-hour in `schedule.allocations` |
-| C4 | Caller ID health | **Built** | Direct incident in public_02; auto-apply rotation with 2-tick confirmation | — |
-| C5 | A/B experiments | **Built** | Core KPI driver; voice + welcome_message + prompt_version | — |
-| C6 | Winner promotion | **Built** | Two-proportions z-test + Bonferroni + minimum 300 calls/arm | — |
-| C7 | Hallucination detection | **Built** | Incident type in public_02; LLM-suggest + validation loop | — |
-| C8 | Governance client | **Built** | Full proposal lifecycle with retry, stale-base re-read, deferred queue | — |
-| C9 | Supervisor view | **Partial** | JSON `/health` endpoint only; no interactive UI | FastAPI page with live tables (1 day) |
-| C10 | Audit store | **Built** | SQLite `audit` table, queryable by ts/workflow/action | — |
-| C11 | Crash recovery | **Built + demonstrated** | Kill/restart test; re-ingests from last chunk, reconciles pending proposals | — |
-| C12 | public_03 load | **Cut** | No time remaining | Benchmark, adjust tick size, monitor SQLite write contention |
+| C1 | Event ingestion at scale | **Built** | Mandatory; crash-safe chunk watermark, idempotent upserts | — |
+| C2 | Lead/feature joins + shared cohort object | **Cut** | No sub-cohort splits needed for public_01/02 KPI headroom; default cohort covers all leads | 1 day: add `age_band`/`lang` cohort table, route experiments per cohort |
+| C3 | Bootstrapping from history (before D0) | **Partial** | History is ingested to set a DID watermark; experiment stats start from D0 (not pre-bootstrapped) | Use history arm counts to seed z-test denominator on D1 |
+| C4 | Call-time optimisation | **Cut** | Small expected lift vs. implementation cost; primary KPI is engagement, not pickup | 2-day sprint: mine `best_hour` from history, weight into `schedule.allocations` |
+| C5 | Caller-ID health | **Built** | Direct incident in public_02; 2-tick confirmation gate prevents false positives; deferred retry queue | — |
+| C6 | Variant experiments (voice + welcome_message) | **Built** | Core KPI driver; uniform allocation → z-test; Bonferroni correction; 300 calls/arm | — |
+| C7 | Winner promotion + decay + rollback | **Partial** | Promotion built; decay detection missing; no rollback after winner drops | Monitor rolling lift; submit rollback proposal if lift < 50% of initial |
+| C8 | Hallucination incident response | **Built** | LLM-suggest → validate → propose with evidence; 24h cooldown; credit guard | — |
+| C9 | Governance client | **Built** | Full lifecycle: draft→applied/lapsed; timing, stale-base re-read, auto-apply vs. approval path, deferred retry | — |
+| C10 | Impact scores + dry runs | **Partial** | Impact score computed (`lift × affected_leads/total`); no true historical dry-run against held-out cohort | Add dry-run simulation against last 48h of calls |
+| C11 | Supervisor view | **Partial** | JSON health log only; no interactive queue UI | 1-day FastAPI page with proposal queue and engagement charts |
+| C12 | Audit store | **Built** | SQLite `audit` table; real query in Section 10 | — |
+| C13 | Crash recovery | **Built + demonstrated** | Kill mid-run, restart, scenario completes; `crash_recovery_test.sh` + log in `reports/` | — |
+| C14 | Loop observability | **Cut** | No metrics endpoint or alerting; logs exist but no structured dashboards | Prometheus exporter for credits/engagement/lag |
+| C15 | Fair credit allocation | **Cut** | Credits not binding on public_01/02; cooldown prevents runaway spend | Per-workflow credit budget with hard stops |
 
 **Principle used:** Build capabilities whose expected outcome lift on the hidden scenarios exceeds the risk of a half-finished implementation. Caller ID, experiments, and governance are load-bearing; call-time optimisation and a supervisor UI are not.
 
