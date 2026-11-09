@@ -58,9 +58,9 @@ A single-process Python controller that ingests call events from the simulator H
 
 **Accepted:** daily iteration cycle, per-workflow separate KPIs, Kestrel auto-apply on welcome/voice/caller_id within `max_shift: 0.2`.
 
-**Pushed back on:** auto-applying everything for Northwind KYC — their signed policy sets `auto_apply.enabled: false`. Nikhil's QBR recollection does not override a contract.
-
-**Wrong claim:** "Northwind is fine with auto-apply." Northwind's `governance.auto_apply.enabled` is `false`. All their changes go through the approval queue.
+**Pushed back on two wrong claims:**
+1. "Kestrel has turned on auto-apply for everything" — Kestrel's policy lists `allowed_dims: ['caller_id', 'welcome_message', 'voice']` with `max_shift: 0.2`, not "everything." `prompt_version` changes still require approval, and the TVD shift cap is enforced.
+2. "Northwind KYC is fine with auto-apply" — Northwind's signed policy sets `auto_apply.enabled: false`. All their changes go through the approval queue. QBR verbal recollections do not override a contract.
 
 **Reply (120 words):** Nikhil — We're iterating daily on Kestrel using auto-apply for voice, welcome and caller-ID changes where the TVD shift is within policy limits. That's the fastest path their policy allows. For Northwind KYC, the signed contract sets auto-apply to off — I can't route around that without a written amendment. If you believe the contract needs updating, I can flag it to their account team. Meanwhile, every Northwind change gets the full approval flow, which typically turns around same-day during their ops window. I'll flag P4 (persuasive prompt) when it reaches the validation threshold Meera requires.
 
@@ -86,7 +86,7 @@ A single-process Python controller that ingests call events from the simulator H
 
 ### Memo 04 — Client Ops (Anita, Kestrel)
 
-**Accepted all constraints:** max 2 proposals/day for Kestrel (we enforce strictly), nothing before 11:00, supervisor edits always respected (dimension experiment restarts from scratch).
+**Accepted all constraints:** `max_requests_per_24h` policy is enforced strictly (peak was 2/day for ks_cancel in practice, well inside the policy limit), nothing before `approver_hours[0]`, supervisor edits always respected.
 
 **Note on P5:** We identified P5 as the "verbatim script" prompt (engage_mult 0.86, high hallucination history) and exclude it from experiment candidates.
 

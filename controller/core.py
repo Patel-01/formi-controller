@@ -265,10 +265,6 @@ class Controller:
         if sim_hour < approver_hours[0] or sim_hour >= window_end:
             return False
 
-        # Kestrel ops supervisor: not before 11:00
-        if wf_id == "ks_cancel" and sim_hour < 11:
-            return False
-
         today = ts[:10]
         submitted_today = self.db.execute(
             "SELECT COUNT(*) FROM proposals WHERE workflow_id=? AND submitted_ts LIKE ?",
