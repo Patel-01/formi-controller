@@ -1,6 +1,6 @@
 # Formi Controller — Outcome-First Agent Loop
 
-**Candidate:** Pankaj Patel &nbsp;·&nbsp; **Language:** Python 3.11 &nbsp;·&nbsp; **Storage:** SQLite WAL &nbsp;·&nbsp; **Date:** 2026-11-09
+**Candidate:** Pankaj Kumar Verma &nbsp;·&nbsp; **Language:** Python 3.11 &nbsp;·&nbsp; **Storage:** SQLite WAL &nbsp;·&nbsp; **Date:** 2026-11-09
 
 > An always-on controller that ingests call events, runs statistical experiments, detects incidents, and proposes config changes — continuously, every 15 simulated minutes, with no manual intervention.
 

@@ -1,6 +1,6 @@
 # Outcome-First Agent Loop — Submission
 
-**Name:** Pankaj Patel · **Date:** 2026-11-09 · **Hours actually spent:** ~18 · **Language / storage:** Python 3.11 / SQLite WAL
+**Name:** Pankaj Kumar Verma · **Date:** 2026-11-09 · **Hours actually spent:** ~18 · **Language / storage:** Python 3.11 / SQLite WAL
 
 ---
 
