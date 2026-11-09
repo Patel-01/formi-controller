@@ -20,7 +20,7 @@ A single-process Python controller that ingests call events from the simulator H
 
 1. The simulator's `/sim/state` timestamp is the authoritative "now" for all cooldowns, proposal windows, and experiment accounting.
 2. Idempotent chunk ingestion: `last_chunk` per workflow is enough for crash recovery; chunk contents never change.
-3. A supervisor edit (`config_changed` with `actor: supervisor`) always resets the base version for all pending proposals; we re-fetch and rebuild.
+3. A supervisor edit (`config_changed` with `actor: supervisor`) cancels pending proposals and refreshes the config cache. If the simulator returns `409 stale_base_version` on a proposal apply, we mark the proposal stale and re-read the config; the next experiment tick will generate a fresh proposal on the updated base.
 4. Hallucination rate baseline is the first 100 connected calls per workflow (before any changes). It stays fixed for the scenario lifetime.
 5. Engagement rate (engaged / connected) is the primary KPI. Pickup rate is a guardrail.
 6. `auto_apply.max_shift` is interpreted as a total-variation distance cap across the changed cohort-dimension distribution.
