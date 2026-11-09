@@ -207,6 +207,7 @@ class Controller:
         self._check_caller_ids(wf_id, ts)
         self._check_hallucination(wf_id, ts)
         self._advance_experiments(wf_id, ts)
+        self._advance_cohort_experiments(wf_id, ts)   # C2: per-cohort splits
 
     # ─── Governance ──────────────────────────────────────────────────────────
 
@@ -925,6 +926,148 @@ class Controller:
                 kv_set(self.db, f"pending_cid:{wf_id}", None)
         else:
             kv_set(self.db, f"pending_cid:{wf_id}", None)
+
+    # ─── Sub-cohort experiments (C2) ─────────────────────────────────────────
+
+    def _advance_cohort_experiments(self, wf_id: str, ts: str):
+        """Run independent per-cohort A/B tests in addition to the global experiment (C2).
+
+        Uses the cohort_id already stored on each call event. For each active cohort
+        with ≥ MIN_CALLS_PER_ARM in both arms, runs the same z-test as the global
+        experiment. If the per-cohort winner differs from the global winner, it
+        proposes a cohort-specific allocation in the config's allocations map.
+        """
+        wf = self.workflows.get(wf_id, {})
+        options = wf.get("options", {})
+        objective = wf.get("objective", {})
+        primary_kpi = objective.get("primary", "engagement_rate")
+        guardrail = objective.get("guardrail", {})
+
+        for dim in ["voice", "welcome_message"]:
+            variants = options.get(dim, [])
+            if len(variants) < 2:
+                continue
+
+            # Find active global experiment for this dim (need its start ts for filtering)
+            global_exp = self.db.execute(
+                "SELECT * FROM experiments WHERE workflow_id=? AND dim=? AND cohort_id IS NULL "
+                "AND status='active'",
+                (wf_id, dim),
+            ).fetchone()
+            if global_exp is None:
+                continue
+            exp_start = global_exp["started_ts"]
+
+            # Discover cohorts that have enough data
+            cohorts = self.db.execute(
+                f"SELECT DISTINCT cohort_id FROM calls "
+                f"WHERE workflow_id=? AND {dim} IS NOT NULL AND cohort_id IS NOT NULL AND ts>=?",
+                (wf_id, exp_start),
+            ).fetchall()
+            cohort_ids = [r["cohort_id"] for r in cohorts if r["cohort_id"]]
+            if not cohort_ids:
+                continue
+
+            cur = self._get_config(wf_id)
+            if cur is None:
+                continue
+            cur_alloc = (cur["config"].get("allocations", {}).get("default", {}).get(dim, {})
+                         if cur else {})
+            control = max(cur_alloc, key=cur_alloc.get) if cur_alloc else variants[0]
+            if control not in variants:
+                control = variants[0]
+
+            challengers = [v for v in variants if v != control]
+            alpha = bonferroni_alpha(len(challengers))
+
+            for cohort_id in cohort_ids:
+                # Already have a done/active cohort experiment for this combo?
+                existing = self.db.execute(
+                    "SELECT status FROM experiments "
+                    "WHERE workflow_id=? AND dim=? AND cohort_id=? AND status IN ('active','done')",
+                    (wf_id, dim, cohort_id),
+                ).fetchone()
+                if existing and existing["status"] == "done":
+                    continue
+
+                arms: dict[str, dict] = {}
+                for variant in variants:
+                    row = self.db.execute(f"""
+                        SELECT COUNT(*) AS dials,
+                               COALESCE(SUM(connected),0) AS connected,
+                               COALESCE(SUM(CASE WHEN connected=1 THEN engaged END),0) AS engaged
+                        FROM calls
+                        WHERE workflow_id=? AND {dim}=? AND cohort_id=? AND ts>=?
+                    """, (wf_id, variant, cohort_id, exp_start)).fetchone()
+                    arms[variant] = {
+                        "dials": row["dials"], "connected": row["connected"],
+                        "engaged": row["engaged"],
+                    }
+
+                ctrl = arms[control]
+                if ctrl["connected"] < MIN_CALLS_PER_ARM:
+                    continue
+                if any(arms[v]["connected"] < MIN_CALLS_PER_ARM for v in challengers):
+                    continue
+
+                if primary_kpi == "engagement_rate":
+                    ctrl_n, ctrl_s = ctrl["connected"], ctrl["engaged"]
+                    ctrl_rate = ctrl_s / ctrl_n if ctrl_n else 0
+                    def arm_ns(a): return a["connected"], a["engaged"]  # noqa: E731
+                    def arm_rate(a): return a["engaged"] / a["connected"] if a["connected"] else 0  # noqa: E731
+                else:
+                    ctrl_n, ctrl_s = ctrl["dials"], ctrl["connected"]
+                    ctrl_rate = ctrl_s / ctrl_n if ctrl_n else 0
+                    def arm_ns(a): return a["dials"], a["connected"]  # noqa: E731
+                    def arm_rate(a): return a["connected"] / a["dials"] if a["dials"] else 0  # noqa: E731
+
+                best_v, best_lift, best_p = None, 0.0, 1.0
+                for v in challengers:
+                    a = arms[v]
+                    n2, s2 = arm_ns(a)
+                    _, p = z_test_two_props(ctrl_n, ctrl_s, n2, s2)
+                    lift = arm_rate(a) - ctrl_rate
+                    if p < alpha and lift > 0.01 and lift > best_lift:
+                        best_v, best_lift, best_p = v, lift, p
+
+                if not best_v:
+                    continue
+
+                # Record cohort experiment as done
+                exp_id = str(uuid.uuid4())
+                self.db.execute(
+                    "INSERT OR IGNORE INTO experiments "
+                    "(exp_id, workflow_id, dim, cohort_id, status, started_ts, concluded_ts, winner, arms_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (exp_id, wf_id, dim, cohort_id, "done", exp_start, ts, best_v,
+                     json.dumps({v: arms[v] for v in variants})),
+                )
+                add_audit(self.db, ts, wf_id, "cohort_winner_found", {
+                    "cohort_id": cohort_id, "dim": dim, "winner": best_v,
+                    "lift": round(best_lift, 4), "p_value": round(best_p, 6),
+                })
+                log.info("[%s] Cohort %s winner for %s: %s (+%.1f%%, p=%.4f)",
+                         wf_id, cohort_id, dim, best_v, best_lift * 100, best_p)
+
+                # Build a cohort-specific allocation in the config
+                others = [v for v in variants if v != best_v]
+                cohort_alloc = {best_v: 0.9, **{v: 0.1 / len(others) for v in others}} \
+                    if others else {best_v: 1.0}
+
+                new_cfg = copy.deepcopy(cur["config"])
+                new_cfg.setdefault("allocations", {})[cohort_id] = {
+                    **(new_cfg["allocations"].get(cohort_id) or {}),
+                    dim: cohort_alloc,
+                }
+                summary = (f"Cohort {cohort_id}: {dim} winner {best_v} "
+                           f"(+{best_lift:.1%} vs default)")
+                rationale = (
+                    f"Per-cohort z-test on cohort_id={cohort_id}: {best_v} beats control "
+                    f"with p={best_p:.4f} (Bonferroni α={alpha:.4f}). "
+                    f"Lift: +{best_lift:.1%}. Setting cohort-specific allocation."
+                )
+                if self._can_submit(wf_id, ts):
+                    self._submit_proposal(wf_id, ts, new_cfg, summary, rationale)
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
 
