@@ -207,12 +207,32 @@ applied → lapsed (if applied config is overwritten by supervisor before taking
 
 ## 8. Scale
 
-Not measured on public_03_load (cut). Based on public_01/02 performance:
+**Measured on public_03_load (12 workflows, ~650k dials/day, 5 days):**
 
-- Each tick: 1 `/sim/advance` + N chunk fetches (N=2-5 per workflow) + DB write = ~200ms wall clock.
-- For 12 workflows (public_03), estimated 2-4 seconds per simulated 15-minute tick.
-- **Breaks first at 10×:** SQLite single-writer bottleneck. With 120 workflows, concurrent detection + proposal writes would serialize. Fix: Postgres with per-workflow advisory locks, or partition workflows across worker processes.
-- **Second break:** LLM/validation API — at 10×, we'd hit the credit budget much faster. Need a dedicated credit budget per workflow tier.
+| Metric | Measured value |
+|---|---|
+| Wall clock per simulated day | ~6.5 minutes |
+| Tick rate | ~15 ticks/minute (15-min sim ticks) |
+| Ingest throughput | ~3,300 events/second |
+| End-to-end decision lag | ~4 seconds per tick |
+| Events ingested (D1–D2 sample) | ~1.4M calls/day across 12 workflows |
+| DB size at D2 | 795 MB (2.5M rows in `calls` table) |
+| DB size projected at D5 | ~2.2 GB |
+| Active experiments | 24 (2 per workflow) |
+| Proposals submitted in first 2 days | 26 |
+
+Each tick: 1 `/sim/advance` + N chunk fetches (N=5-15 for 12 workflows) + DB writes ≈ 4 seconds wall clock.
+
+**What breaks first at 10×** (120 workflows, ~6.5M dials/day):
+1. **SQLite single-writer**: the main loop serializes all writes. At 120 workflows, one slow DB write blocks the whole tick. Fix: Postgres with per-workflow advisory locks, or shard workflows across processes each with its own DB.
+2. **DB size**: raw `calls` table grows ~220MB/day at 12 workflows; at 120 it would be ~2.2GB/day. Fix: retain only last 7 days of raw events; keep only aggregated per-arm stats forever.
+3. **Memory**: each call row in SQLite fetchall pulls into RAM. Fix: stream with cursors, process in batches of 10k.
+4. **LLM/validation credits**: at 10×, incident response could exhaust credits in one scenario. Fix: per-workflow credit budgets with hard stops.
+
+**How to partition at scale:**
+- One controller process per 10-20 workflows (Python GIL + SQLite writer = single-threaded anyway).
+- Each partition owns its own SQLite (or Postgres schema).
+- A thin orchestrator assigns workflows to partitions, monitors credit burn, escalates incidents.
 
 ---
 
@@ -332,7 +352,9 @@ Credits: 70 · 11 applied (7 beneficial, 2 neutral, 2 harmful)
 
 4. **History watermark is per-DB-restart.** If we restart mid-scenario, we recompute the watermark from scratch. This could briefly let old history calls bleed into live-call detection. Fix: persist watermark to SQLite on first completion.
 
-5. **No true per-cohort experiments.** All experiments use the `default` cohort. If Northwind's senior/Tamil cohort benefits from a different voice than the general population, we won't find it.
+5. **No multi-dim batching in proposals.** Anita (Kestrel ops) asked for "five changes in one request." We submit one proposal per dimension change (max 2/day), so if we have 3+ changes ready they queue across days. At current experiment cadence this hasn't been a problem (peak was 2/day), but needs to be fixed for production.
+
+6. **No true per-cohort experiments.** All experiments use the `default` cohort. If Northwind's senior/Tamil cohort benefits from a different voice than the general population, we won't find it.
 
 ---
 
