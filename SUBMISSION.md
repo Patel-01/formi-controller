@@ -157,7 +157,7 @@ Two specific corrections to other memos: (1) Sales is wrong about Northwind KYC 
 
 **Deciding a winner:** Two-proportions z-test (engagement rate: engaged ÷ connected). Bonferroni correction: α = 0.05 / k where k = number of challenger arms. Minimum 300 connected calls per arm (chosen to give 80% power at a 4pp absolute effect). Winner must also beat control by ≥ 1pp (practical significance floor). False-winner rate: α = 2.5% per arm at 300 calls. With 2–3 challengers per experiment, expect ~1 false winner per 15 experiments.
 
-**Decay and rollback:** After winner promotion, we track the last 150 connected calls. If the winner's engagement rate drops below 50% of the observed lift at promotion time AND the rate is below baseline, we submit a rollback proposal. We also monitor the decaying-variant share; if it's >50% after 3 days, we flag it.
+**Decay and rollback:** After winner promotion, the winning variant becomes the new control and new experiments are launched on top of it. Formal decay detection (rolling lift tracking + rollback proposal) is not yet implemented — if a winner degrades, the next experiment will naturally discover a new winner, but there's no early-warning rollback. This is listed as a known weakness (see §13).
 
 **Call time and caller ID:** History is ingested once at startup. A `history_watermark` stores the max event_id from history ingestion. All caller-ID health checks use only live calls (`event_id > watermark`) to avoid historical patterns biasing the detection. Caller-ID spam detection uses a rolling 150-call window per DID with a 2-tick confirmation gate (must appear bad in 2 consecutive checks before rotating) to prevent noise-driven false positives.
 
@@ -184,7 +184,7 @@ applied → lapsed (if applied config is overwritten by supervisor before taking
 
 **Impact score:** `min(1.0, estimated_lift × (affected_leads / total_eligible_leads))` where `estimated_lift` is the z-test point estimate capped at 0.3. Acknowledged as uncertain; the rationale states confidence interval.
 
-**Supervisor edits:** Detected via `config_changed / actor: supervisor` events. Any pending proposal for that workflow is immediately stale (auto-reread on next 409). Active experiments on the edited dimension are reset.
+**Supervisor edits:** Detected via `config_changed / actor: supervisor` events. Active experiments on the edited dimension are cancelled and not restarted — we don't second-guess a human decision; a future experiment on that dimension requires a new trigger. Any pending proposal is marked stale and withdrawn (not re-submitted with the same content).
 
 ---
 
@@ -351,7 +351,7 @@ Credits: 70 · 11 applied (7 beneficial, 2 neutral, 2 harmful)
 
 2. **Statistical false positives on welcome_message.** With 300 calls/arm and 4 variants, a 2.3% spurious lift will occasionally pass the z-test. A holdout arm or a minimum lift threshold of 3% (not 1%) would reduce this.
 
-3. **nw_renewal W3 decaying variant sticks at 90%.** Our decay detection fires but the rollback proposal doesn't get applied fast enough. We submit within hours but the decaying share stays at 90%. The approver window and latency mean the rollback always takes 24+ hours.
+3. **No decay/rollback for promoted winners.** If a winner degrades after promotion, the system won't detect it until the next experiment cycle. A rolling post-promotion lift monitor should auto-submit a rollback proposal if the winner drops below 50% of its observed lift within a week.
 
 4. **History watermark is per-DB-restart.** If we restart mid-scenario, we recompute the watermark from scratch. This could briefly let old history calls bleed into live-call detection. Fix: persist watermark to SQLite on first completion.
 
