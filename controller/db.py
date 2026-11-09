@@ -32,12 +32,16 @@ CREATE TABLE IF NOT EXISTS experiments (
     exp_id      TEXT PRIMARY KEY,
     workflow_id TEXT NOT NULL,
     dim         TEXT NOT NULL,
+    cohort_id   TEXT,          -- NULL = global experiment; non-NULL = per-cohort (C2)
     status      TEXT NOT NULL DEFAULT 'active',
     started_ts  TEXT NOT NULL,
     concluded_ts TEXT,
     winner      TEXT,
     arms_json   TEXT NOT NULL
 );
+
+-- Migration: add cohort_id if upgrading from an older schema
+CREATE INDEX IF NOT EXISTS exp_cohort ON experiments(workflow_id, dim, cohort_id, status);
 
 CREATE TABLE IF NOT EXISTS proposals (
     prop_id     TEXT PRIMARY KEY,
@@ -70,10 +74,21 @@ CREATE TABLE IF NOT EXISTS hallucination_incidents (
 """
 
 
+_MIGRATIONS = [
+    # C2: add cohort_id to experiments (safe no-op if already present)
+    "ALTER TABLE experiments ADD COLUMN cohort_id TEXT",
+]
+
+
 def open_db(path: str = "controller.db"):
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+        except Exception:
+            pass  # column already exists
     conn.commit()
     return conn
 
