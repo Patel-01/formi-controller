@@ -329,6 +329,7 @@ Credits: 70 · 11 applied (7 beneficial, 2 neutral, 2 harmful)
 - **ks_cancel pickup +9.7%**: The spam DID (D2) was detected via 2-tick confirmation and rotated from 50% to 8-9% share within half a day of onset. This is the strongest single result.
 - **ks_cancel hallucinated calls 400 vs 330**: The supervisor edit at D3 11:30 introduced a bad prompt. We detected it (D3 18:30) and triggered an LLM fix, but the fix proposal was rejected by the approver ("judgement call"). MTTR: null. Root cause: approver-rejection is not retried with a modified proposal.
 - **nw_renewal harmful changes**: Two voice experiments both picked harmful winners (false positives at 300 calls/arm). With 4 voice options, Bonferroni α = 0.0125 per arm, still ~1.25% false positive rate; at 300 calls we're at the boundary.
+- **nw_renewal W3 decaying at 90%**: The supervisor edited nw_renewal at D5 15:00, resetting the welcome_message allocation back to W3=90%. Our earlier beneficial welcome_message changes (v4, v6) were overridden. Without a rollback detector, W3 stayed at 90% for the rest of the scenario.
 
 ---
 
